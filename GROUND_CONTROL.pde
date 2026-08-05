@@ -4,17 +4,27 @@ Serial myPort;
 String rawTelemetry = "WAITING FOR DATA...";
 
 // Parsed Telemetry Data
-float alt = 0;
+float rawAlt = 0;
+float alt = 0; // AGL (Above Ground Level)
 float tempVal = 0;
 float pitch = 0, yaw = 0, roll = 0;
 float accX = 0, accY = 0, accZ = 0;
+float horizontalSpeed = 0; // m/s
 String gpsData = "NO LOCK";
 int satCountVal = 0;
 float latVal = 0.0, lonVal = 0.0;
 
+// Ground-calculated Vertical Speed Variables (Baro-based)
+float verticalSpeed = 0;   // m/s
+float previousAlt = 0.0;   // For tracking delta altitude
+float altOffset = 0.0;     // Pad altitude calibration
+int lastRxTime = 0;        
+boolean isCalibrated = false;
+
 // Graph History Arrays
 int graphWidth = 400;
 float[] altHistory = new float[graphWidth];
+float[] vertSpeedHistory = new float[graphWidth];
 float[] accXHistory = new float[graphWidth];
 float[] accYHistory = new float[graphWidth];
 float[] accZHistory = new float[graphWidth];
@@ -30,12 +40,10 @@ void settings() {
 void setup() {
   println("Attempting to connect to COM6...");
   
-  // Create timestamped log filename: YYYY-MM-DD_HH-MM-SS_LOG.txt
   String timestamp = nf(year(), 4) + "-" + nf(month(), 2) + "-" + nf(day(), 2) + "_" + 
                      nf(hour(), 2) + "-" + nf(minute(), 2) + "-" + nf(second(), 2);
   String fileName = timestamp + "_LOG.txt";
   
-  // Directly point to the Windows Downloads folder using System property
   String userHome = System.getProperty("user.home");
   String downloadsPath = userHome + "/Downloads/" + fileName;
   
@@ -52,14 +60,14 @@ void setup() {
 }
 
 void draw() {
-  background(15, 20, 25); // Dark aerospace theme
+  background(15, 20, 25); 
   
   float leftColW = width * 0.58;  
   float rightColX = leftColW + 60;
   float rightColW = width - rightColX - 40;
   
-  float graphH = height * 0.22;
-  float panelH = height * 0.18;
+  float graphH = height * 0.17; 
+  float panelH = height * 0.16;
   float barH = height * 0.035;
   
   // Title
@@ -72,26 +80,40 @@ void draw() {
   textSize(14);
   text("RAW: " + rawTelemetry, 30, 70);
   
+  // Calibration UI Feedback
+  if (!isCalibrated) {
+    fill(255, 50, 50);
+    text("⚠️ PRESS 'C' TO ZERO PAD ALTITUDE (AGL) BEFORE FLIGHT", 30, 90);
+  } else {
+    fill(0, 255, 150);
+    text("✅ PAD ALTITUDE ZEROED. READY FOR LAUNCH.", 30, 90);
+  }
+  
   // ==========================================
   // LEFT COLUMN (Graphs & Stats)
   // ==========================================
-  drawGraph("BARO ALTITUDE (m)", 30, 100, leftColW, graphH, altHistory, color(0, 200, 255));
-  drawMultiGraph("ACCELERATION (m/s2)", 30, 130 + graphH, leftColW, graphH, 
-                   accXHistory, accYHistory, accZHistory, 
-                   color(255, 100, 100), color(100, 255, 100), color(100, 150, 255));
-  drawStatsPanel(30, 160 + (graphH * 2), leftColW, panelH);
+  float lY = 110;
+  drawGraph("AGL ALTITUDE (m)", 30, lY, leftColW, graphH, altHistory, color(0, 200, 255));
+  lY += graphH + 25;
+  drawZeroGraph("BARO VERTICAL SPEED (m/s)", 30, lY, leftColW, graphH, vertSpeedHistory, color(255, 200, 0));
+  lY += graphH + 25;
+  drawMultiGraph("ACCELERATION (m/s2)", 30, lY, leftColW, graphH, 
+                 accXHistory, accYHistory, accZHistory, 
+                 color(255, 100, 100), color(100, 255, 100), color(100, 150, 255));
+  lY += graphH + 25;
+  drawStatsPanel(30, lY, leftColW, panelH);
   
   // ==========================================
   // RIGHT COLUMN (Bars & Secondary Graphs)
   // ==========================================
-  float rY = 100;
+  float rY = 110;
   drawCenterBar("PITCH", rightColX, rY, rightColW, barH, pitch, -180, 180, color(255, 100, 100));
   rY += barH + 15;
   drawCenterBar("YAW", rightColX, rY, rightColW, barH, yaw, -180, 180, color(100, 255, 100));
   rY += barH + 15;
   drawCenterBar("ROLL", rightColX, rY, rightColW, barH, roll, -180, 180, color(100, 100, 255));
   
-  rY += barH + 25;
+  rY += barH + 20;
   drawCenterBar("ACC X", rightColX, rY, rightColW, barH, accX, -30, 30, color(255, 100, 100));
   rY += barH + 15;
   drawCenterBar("ACC Y", rightColX, rY, rightColW, barH, accY, -30, 30, color(100, 255, 100));
@@ -106,6 +128,18 @@ void draw() {
   drawTempGraph("BARO TEMPERATURE (°C)", rightColX, rY, rightColW, smallGraphH, tempHistory, color(255, 100, 200));
 }
 
+// Keyboard Calibration
+void keyPressed() {
+  if (key == 'c' || key == 'C') {
+    // Capture the current raw altitude as the ground zero point
+    altOffset = rawAlt;
+    previousAlt = 0.0;
+    verticalSpeed = 0.0;
+    isCalibrated = true;
+    println("CALIBRATED: Pad Altitude Offset set to " + altOffset + "m. AGL Zeroed.");
+  }
+}
+
 // ==========================================
 // SERIAL EVENT LOGIC
 // ==========================================
@@ -114,7 +148,6 @@ void serialEvent(Serial myPort) {
   if (inString != null) {
     inString = inString.trim();
     
-    // Log every single incoming line immediately to Downloads
     if (logFile != null) {
       String fileTimestamp = nf(year(), 4) + "-" + nf(month(), 2) + "-" + nf(day(), 2) + " " + 
                              nf(hour(), 2) + ":" + nf(minute(), 2) + ":" + nf(second(), 2) + "." + nf(millis() % 1000, 3);
@@ -140,9 +173,27 @@ void serialEvent(Serial myPort) {
       if (barVals.length > 1) {
          float pressure_hPa = barVals[1]; 
          if (pressure_hPa > 0) {
-             alt = 44330.0 * (1.0 - pow(pressure_hPa / 1013.25, 0.1903));
+             rawAlt = 44330.0 * (1.0 - pow(pressure_hPa / 1013.25, 0.1903));
+             alt = rawAlt - altOffset; // Apply Pad AGL offset
          }
       }
+      
+      // --- GROUND-SIDE VERTICAL SPEED CALCULATION (BARO) ---
+      int currentTime = millis();
+      if (lastRxTime > 0 && isCalibrated) { 
+        float dt = (currentTime - lastRxTime) / 1000.0; // Time in seconds
+        
+        if (dt > 0) {
+          // Speed = Change in Altitude / Change in Time
+          verticalSpeed = (alt - previousAlt) / dt;
+        }
+      }
+      previousAlt = alt; // Store current altitude for the next calculation
+      lastRxTime = currentTime;
+      // -----------------------------------------------------
+      
+      float[] hspVals = extractList(rawTelemetry, "HSP:");
+      if (hspVals.length > 0) horizontalSpeed = hspVals[0];
       
       int gpsIdx = rawTelemetry.indexOf("GPS:");
       if (gpsIdx != -1) {
@@ -174,6 +225,7 @@ void serialEvent(Serial myPort) {
       
       for (int i = 0; i < graphWidth - 1; i++) {
         altHistory[i] = altHistory[i+1];
+        vertSpeedHistory[i] = vertSpeedHistory[i+1];
         accXHistory[i] = accXHistory[i+1];
         accYHistory[i] = accYHistory[i+1];
         accZHistory[i] = accZHistory[i+1];
@@ -181,6 +233,7 @@ void serialEvent(Serial myPort) {
         tempHistory[i] = tempHistory[i+1];
       }
       altHistory[graphWidth - 1] = alt; 
+      vertSpeedHistory[graphWidth - 1] = verticalSpeed;
       accXHistory[graphWidth - 1] = accX;
       accYHistory[graphWidth - 1] = accY;
       accZHistory[graphWidth - 1] = accZ;
@@ -239,7 +292,7 @@ void drawGraph(String title, float x, float y, float w, float h, float[] data, c
   fill(c); textSize(16);
   text(title + ": " + nf(data[data.length-1], 0, 1), x, y - 10);
   
-  float maxVal = 100; 
+  float maxVal = 10; 
   for (int i = 0; i < data.length; i++) {
     if (data[i] > maxVal) maxVal = data[i];
   }
@@ -268,6 +321,49 @@ void drawGraph(String title, float x, float y, float w, float h, float[] data, c
   }
   endShape();
   strokeWeight(1); 
+}
+
+void drawZeroGraph(String title, float x, float y, float w, float h, float[] data, color c) {
+  fill(30); stroke(100);
+  rect(x, y, w, h);
+  
+  fill(c); textSize(16);
+  text(title + ": " + nf(data[data.length-1], 0, 1), x, y - 10);
+  
+  float maxV = 5; 
+  float minV = -5;
+  for (int i = 0; i < data.length; i++) {
+    if (data[i] > maxV) maxV = data[i];
+    if (data[i] < minV) minV = data[i];
+  }
+  maxV *= 1.1; 
+  minV *= 1.1;
+
+  fill(150); textSize(11);
+  textAlign(RIGHT, CENTER);
+  text(nf(maxV, 0, 1), x - 5, y);
+  text(nf((maxV + minV) / 2, 0, 1), x - 5, y + h / 2);
+  text(nf(minV, 0, 1), x - 5, y + h);
+  
+  textAlign(CENTER, TOP);
+  text("-400", x, y + h + 5);
+  text("-200", x + w / 2, y + h + 5);
+  text("0", x + w, y + h + 5);
+  textAlign(LEFT, BASELINE);
+
+  float zeroY = map(0, minV, maxV, y + h, y);
+  stroke(150); strokeWeight(1);
+  line(x, zeroY, x + w, zeroY);
+
+  noFill(); stroke(c); strokeWeight(2);
+  beginShape();
+  for (int i = 0; i < data.length; i++) {
+    float xPos = map(i, 0, data.length-1, x, x + w);
+    float yPos = map(data[i], minV, maxV, y + h, y); 
+    vertex(xPos, yPos);
+  }
+  endShape();
+  strokeWeight(1);
 }
 
 void drawMultiGraph(String title, float x, float y, float w, float h, 
@@ -345,7 +441,7 @@ void drawSatGraph(String title, float x, float y, float w, float h, float[] data
 
   fill(150); textSize(11);
   textAlign(RIGHT, CENTER);
-  text("20", x - 5, y);                        
+  text("20", x - 5, y);                    
   text("10", x - 5, y + h / 2);                      
   text("0", x - 5, y + h);                    
   
@@ -384,7 +480,7 @@ void drawTempGraph(String title, float x, float y, float w, float h, float[] dat
 
   fill(150); textSize(11);
   textAlign(RIGHT, CENTER);
-  text(nf(maxVal, 0, 0), x - 5, y);                        
+  text(nf(maxVal, 0, 0), x - 5, y);                    
   text(nf((maxVal + minVal) / 2, 0, 0), x - 5, y + h / 2);                      
   text(nf(minVal, 0, 0), x - 5, y + h);                    
   
@@ -430,16 +526,16 @@ void drawStatsPanel(float x, float y, float w, float h) {
   fill(30); stroke(100);
   rect(x, y, w, h);
   
-  fill(200); textSize(20);
-  text("FLIGHT COMPUTERS / SYSTEM DATA", x + 20, y + 30);
+  fill(200); textSize(18);
+  text("FLIGHT COMPUTERS / SYSTEM DATA", x + 20, y + 25);
   
-  textSize(16);
+  textSize(15);
   fill(255, 255, 0);
-  text("GPS COORDS: " + gpsData + " (SATS: " + satCountVal + ")", x + 20, y + 70);
+  text("GPS COORDS: " + gpsData + " (SATS: " + satCountVal + ")", x + 20, y + 55);
   
   fill(0, 255, 200);
-  text("LATEST ALTITUDE: " + nf(alt, 0, 2) + " m", x + 20, y + 100);
+  text("AGL ALT: " + nf(alt, 0, 1) + " m | VERT SPD: " + nf(verticalSpeed, 0, 1) + " m/s | HORIZ SPD: " + nf(horizontalSpeed, 0, 1) + " m/s", x + 20, y + 85);
   
   fill(200);
-  text("ACC MAX G: " + nf(max(abs(accX), abs(accY), abs(accZ)) / 9.81, 0, 2) + " Gs", x + 20, y + 130);
+  text("ACC MAX G: " + nf(max(abs(accX), abs(accY), abs(accZ)) / 9.81, 0, 2) + " Gs", x + 20, y + 115);
 }
