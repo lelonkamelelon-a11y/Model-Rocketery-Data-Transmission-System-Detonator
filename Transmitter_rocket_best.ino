@@ -17,6 +17,7 @@
 
 #define BUTTON_PIN D0
 #define LED_PIN    21
+#define BUZZER_PIN D1 // Added Buzzer Pin
 
 // BN-180 GPS UART Pins
 #define GPS_RX_PIN 44 
@@ -34,6 +35,12 @@ const float GYRO_DEAD_ZONE = 2.0;
 unsigned long lastSendTime = 0;
 const unsigned long SEND_INTERVAL = 0; 
 
+// Buzzer timing variables
+unsigned long lastBeepTime = 0;
+const unsigned long BEEP_INTERVAL = 10000; // 10 seconds
+const unsigned long BEEP_DURATION = 100;   // 100 milliseconds beep length
+bool isBeeping = false;
+
 float gyroOffsetX = 0.0, gyroOffsetY = 0.0, gyroOffsetZ = 0.0;
 
 void setup() {
@@ -44,6 +51,10 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); 
+  
+  // Initialize Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   Wire.begin(); 
   
@@ -74,11 +85,25 @@ void setup() {
 
 void loop() {
   while (Serial1.available() > 0) gps.encode(Serial1.read());
+  
+  unsigned long currentMillis = millis();
+
+  // Non-blocking Buzzer Logic
+  if (!isBeeping && (currentMillis - lastBeepTime >= BEEP_INTERVAL)) {
+    lastBeepTime = currentMillis;
+    digitalWrite(BUZZER_PIN, HIGH);
+    isBeeping = true;
+  }
+  
+  if (isBeeping && (currentMillis - lastBeepTime >= BEEP_DURATION)) {
+    digitalWrite(BUZZER_PIN, LOW);
+    isBeeping = false;
+  }
 
   if (!loraInitialized) return;
 
-  if (millis() - lastSendTime >= SEND_INTERVAL) {
-    lastSendTime = millis(); 
+  if (currentMillis - lastSendTime >= SEND_INTERVAL) {
+    lastSendTime = currentMillis; 
     digitalWrite(LED_PIN, LOW);
     
     // Read IMU
@@ -93,9 +118,9 @@ void loop() {
     float temp = bmp.readTemperature();
     float pres = bmp.readPressure() / 100.0F;
 
-    // Assemble Payload with GPS
-    String payload = "DATA ACC:" + String(imu.readFloatAccelX(), 2) + "," + String(imu.readFloatAccelY(), 2) + 
-                     " GYR:" + String(gx, 2) + "," + String(gy, 2) + 
+    // Assemble Payload with GPS (Added Z-axis for ACC and GYR)
+    String payload = "DATA ACC:" + String(imu.readFloatAccelX(), 2) + "," + String(imu.readFloatAccelY(), 2) + "," + String(imu.readFloatAccelZ(), 2) +
+                     " GYR:" + String(gx, 2) + "," + String(gy, 2) + "," + String(gz, 2) + 
                      " BAR:" + String(temp, 1) + "C," + String(pres, 1) + "hPa" +
                      " GPS:" + String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6) + 
                      " SAT:" + String(gps.satellites.value());
